@@ -1,0 +1,32 @@
+# Alaska Award Ticket Monitor - Configuration
+# Copy this to config.yaml and fill in your values.
+
+# Global scan interval in seconds (minimum 10)
+scan_interval: 300  # 5 minutes
+
+# Routes to monitor
+routes:
+  - origin: SFO
+    destination: NRT
+    cabin: J          # J = Business, F = First
+    start_date: "2026-12-15"
+    end_date: "2026-12-30"
+    max_miles: 55000  # Alert if saver seat < this many miles
+
+  # - origin: LAX
+  #   destination: HND
+  #   cabin: F
+  #   start_date: "2026-12-20"
+  #   end_date: "2026-12-28"
+  #   max_miles: 80000
+
+# Telegram Bot settings
+# 1. Create a bot via @BotFather on Telegram
+# 2. Get your chat_id by messaging @userinfobot
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: "YOUR_CHAT_ID_HERE"
+
+# Database settings
+database:
+  path: "./data/awards.db"
