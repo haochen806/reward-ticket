@@ -4,7 +4,7 @@ import time
 
 from camoufox.sync_api import Camoufox
 
-from .auth import load_cookies, inject_cookies, check_auth
+from .auth import load_cookies, inject_cookies, check_auth, SessionKeepAlive
 
 log = logging.getLogger(__name__)
 
@@ -21,22 +21,28 @@ class BrowserSession:
         self._page = None
         self._cookies_path = cookies_path
         self._authenticated = False
+        self._keep_alive = None
 
     def start(self):
         log.info("Starting Camoufox browser session...")
         self._camoufox = Camoufox(headless=True)
         self._browser = self._camoufox.__enter__()
         self._page = self._browser.new_page()
-        self._page.goto(SEARCH_URL, timeout=30000, wait_until="networkidle")
-        time.sleep(2)
 
-        # Load cookies if available
+        # Load cookies BEFORE first navigation
         cookies = load_cookies(self._cookies_path)
         if cookies:
             inject_cookies(self._page, cookies)
-            self._page.reload(wait_until="networkidle")
-            time.sleep(2)
+
+        self._page.goto(SEARCH_URL, timeout=30000, wait_until="domcontentloaded")
+        time.sleep(3)
+
+        if cookies:
             self._authenticated = check_auth(self._page)
+            if self._authenticated:
+                # Start keep-alive to prevent session expiry
+                self._keep_alive = SessionKeepAlive(self._page, self._cookies_path)
+                self._keep_alive.start()
             log.info(f"Auth status: {'authenticated' if self._authenticated else 'not authenticated (cookies expired?)'}")
         else:
             log.info("No cookies — running unauthenticated (search only, no booking)")
@@ -52,6 +58,9 @@ class BrowserSession:
         return self._page
 
     def stop(self):
+        if self._keep_alive:
+            self._keep_alive.stop()
+            self._keep_alive = None
         if self._camoufox:
             try:
                 self._camoufox.__exit__(None, None, None)
