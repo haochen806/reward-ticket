@@ -4,6 +4,8 @@ import time
 
 from camoufox.sync_api import Camoufox
 
+from .auth import load_cookies, inject_cookies, check_auth
+
 log = logging.getLogger(__name__)
 
 DATA_URL = "https://www.alaskaair.com/search/results/__data.json"
@@ -13,10 +15,12 @@ SEARCH_URL = "https://www.alaskaair.com/search"
 class BrowserSession:
     """Manages a persistent Camoufox browser session for scraping Alaska Airlines."""
 
-    def __init__(self):
+    def __init__(self, cookies_path: str = "./data/cookies.json"):
         self._camoufox = None
         self._browser = None
         self._page = None
+        self._cookies_path = cookies_path
+        self._authenticated = False
 
     def start(self):
         log.info("Starting Camoufox browser session...")
@@ -25,7 +29,27 @@ class BrowserSession:
         self._page = self._browser.new_page()
         self._page.goto(SEARCH_URL, timeout=30000, wait_until="networkidle")
         time.sleep(2)
+
+        # Load cookies if available
+        cookies = load_cookies(self._cookies_path)
+        if cookies:
+            inject_cookies(self._page, cookies)
+            self._page.reload(wait_until="networkidle")
+            time.sleep(2)
+            self._authenticated = check_auth(self._page)
+            log.info(f"Auth status: {'authenticated' if self._authenticated else 'not authenticated (cookies expired?)'}")
+        else:
+            log.info("No cookies — running unauthenticated (search only, no booking)")
+
         log.info("Browser session established")
+
+    @property
+    def authenticated(self) -> bool:
+        return self._authenticated
+
+    @property
+    def page(self):
+        return self._page
 
     def stop(self):
         if self._camoufox:

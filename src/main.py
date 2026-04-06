@@ -8,6 +8,7 @@ from .db import Database
 from .scraper import BrowserSession
 from .parser import parse_sveltekit
 from .alerter import TelegramAlerter
+from .booker import Booker
 
 log = logging.getLogger("reward-ticket")
 
@@ -39,6 +40,10 @@ def main():
     db = Database(config.database.path)
     alerter = TelegramAlerter(config.telegram.bot_token, config.telegram.chat_id)
     browser = BrowserSession()
+
+    # Wire up booker for auto-booking via Telegram
+    booker = Booker(browser, alerter, db)
+    alerter.set_booker(booker)
 
     # Start Telegram long-polling in daemon thread
     alerter.start_polling(db)

@@ -19,7 +19,12 @@ class TelegramAlerter:
         self.chat_id = chat_id
         self._offset = 0
         self._db = None
+        self._booker = None
         self._polling_thread = None
+
+    def set_booker(self, booker):
+        """Attach the booker for handling book/confirm callbacks."""
+        self._booker = booker
 
     def send_alert(self, seat: AwardSeat):
         text = (
@@ -29,20 +34,27 @@ class TelegramAlerter:
             f"{seat.miles:,} miles + ${seat.tax:.2f} tax"
         )
 
-        deep_link = self._build_deep_link(seat)
-
         keyboard = {
             "inline_keyboard": [[
-                {"text": "Book", "url": deep_link},
+                {"text": "Book Now", "callback_data": json.dumps({"action": "book", "id": seat.id})},
                 {"text": "Dismiss", "callback_data": json.dumps({"action": "dismiss", "id": seat.id})},
             ]]
         }
 
         self._send_message(text, keyboard)
 
+    def send_confirmation(self, text: str, award_id: str):
+        """Send a booking confirmation prompt with Confirm/Cancel buttons."""
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "CONFIRM Purchase", "callback_data": json.dumps({"action": "confirm", "id": award_id})},
+                {"text": "Cancel", "callback_data": json.dumps({"action": "cancel", "id": award_id})},
+            ]]
+        }
+        self._send_message(text, keyboard)
+
     def send_health_warning(self, message: str):
-        text = f"HEALTH WARNING\n{message}"
-        self._send_message(text)
+        self._send_message(message)
 
     def start_polling(self, db):
         self._db = db
@@ -94,8 +106,38 @@ class TelegramAlerter:
 
         if action == "dismiss" and award_id and self._db:
             self._db.update_status(award_id, "dismissed")
-            self._answer_callback(callback["id"], "Dismissed - won't alert again")
+            self._answer_callback(callback["id"], "Dismissed")
             log.info(f"Award {award_id} dismissed via Telegram")
+
+        elif action == "book" and award_id and self._booker:
+            self._answer_callback(callback["id"], "Starting booking...")
+            # Run booking in a thread to not block polling
+            award = self._db.get_award(award_id)
+            if award:
+                seat = AwardSeat(
+                    airline=award["airline"],
+                    flight_number=award["flight_number"],
+                    origin=award["origin"],
+                    destination=award["destination"],
+                    date=award["date"],
+                    cabin=award["cabin"],
+                    miles=award["miles"],
+                    tax=award["tax"],
+                    fare_class=award["fare_class"],
+                    seat_type=award["seat_type"],
+                )
+                threading.Thread(target=self._booker.book, args=(seat,), daemon=True).start()
+            else:
+                self._answer_callback(callback["id"], "Award not found")
+
+        elif action == "confirm" and award_id and self._booker:
+            self._answer_callback(callback["id"], "Confirmed! Completing purchase...")
+            self._booker.handle_confirm(award_id, True)
+
+        elif action == "cancel" and award_id and self._booker:
+            self._answer_callback(callback["id"], "Cancelled")
+            self._booker.handle_confirm(award_id, False)
+
         else:
             self._answer_callback(callback["id"], "Unknown action")
 
@@ -117,14 +159,3 @@ class TelegramAlerter:
                 log.error(f"Telegram send failed ({resp.status_code}): {resp.text}")
         except requests.RequestException as e:
             log.error(f"Telegram send error: {e}")
-
-    def _build_deep_link(self, seat: AwardSeat) -> str:
-        params = urlencode({
-            "prior-origin-1": seat.origin,
-            "prior-destination-1": seat.destination,
-            "prior-departure-date-1": seat.date,
-            "adults": 1,
-            "prior-travel-type": "award",
-            "prior-trip-type": "oneway",
-        })
-        return f"https://www.alaskaair.com/booking/flights?{params}"
