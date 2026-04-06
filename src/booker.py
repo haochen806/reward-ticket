@@ -1,22 +1,21 @@
 """Auto-booking engine for Alaska Airlines award tickets.
 
-Flow:
-1. Telegram alert fires with Book Now button
-2. User clicks Book Now → triggers booking
-3. Camoufox navigates to search results, clicks the matching fare
-4. Trip Summary loads → clicks "Add to cart"
-5. Sends Telegram confirmation: "Booking X for Y miles. CONFIRM within 30s?"
-6. On CONFIRM → clicks Purchase to complete
-7. On timeout/cancel → aborts
+Proven e2e flow (classic checkout):
+1. Search results → click fare button
+2. Trip summary → submit "Add to cart" form
+3. Cart → click "Continue to checkout" (fs-auro-button)
+4. Eject to classic checkout (form submit)
+5. Fill passenger info → submit form
+6. Seats page → submit seats form (skip)
+7. Payment page → fill CVV → click PURCHASE (no_wait_after)
+8. Confirmation page
 """
 
-import json
 import logging
-import time
 import threading
+import time
 
 from .models import AwardSeat
-from .auth import load_cookies, check_auth
 
 log = logging.getLogger(__name__)
 
@@ -24,78 +23,115 @@ RESULTS_URL = "https://www.alaskaair.com/search/results"
 
 
 class Booker:
-    """Handles the award ticket booking flow via Camoufox."""
-
-    def __init__(self, browser, alerter, db):
+    def __init__(self, browser, alerter, db, config=None):
         self.browser = browser
         self.alerter = alerter
         self.db = db
+        self.config = config or {}
         self._pending_confirm = {}
         self._confirm_result = {}
 
     def book(self, seat: AwardSeat) -> bool:
         if not self.browser.authenticated:
             log.error("Cannot book — not authenticated")
-            self.alerter.send_health_warning(
-                "Booking failed: not authenticated.\n"
-                "Export cookies from alaskaair.com to data/cookies.json"
-            )
+            self.alerter.send_health_warning("Booking failed: not authenticated. Run: python -m src.login")
             return False
 
         page = self.browser.page
         log.info(f"Starting booking: {seat}")
 
         try:
-            # Step 1: Load search results
-            params = f"O={seat.origin}&D={seat.destination}&OD={seat.date}&A=1&RT=false&ShoppingMethod=onlineaward&locale=en-us"
+            # Step 1: Search results
+            dt = seat.date
+            params = f"O={seat.origin}&D={seat.destination}&OD={dt}&A=1&RT=false&ShoppingMethod=onlineaward&locale=en-us"
             page.goto(f"{RESULTS_URL}?{params}", timeout=60000, wait_until="domcontentloaded")
             time.sleep(8)
 
-            if "Select Flights" not in page.title():
-                log.error(f"Results page didn't load: {page.title()}")
-                return False
+            # Step 2: Select fare — match by miles (handle decimals like 47.5k)
+            miles_k = seat.miles / 1000
+            if miles_k == int(miles_k):
+                miles_str = str(int(miles_k))
+            else:
+                miles_str = f"{miles_k:g}"
 
-            # Step 2: Click the matching fare button
-            cabin_label = "Business" if seat.cabin == "J" else "First"
-            clicked = page.evaluate('''([miles, cabinLabel]) => {
-                const btns = document.querySelectorAll("button");
-                // Try exact miles match in the target cabin column
-                const milesK = (miles / 1000).toString().replace(".0", "");
-                for (const b of btns) {
-                    const text = b.textContent || "";
-                    if (text.includes(milesK + "k") && text.includes("points")) {
-                        b.click();
-                        return "clicked: " + text.trim().substring(0, 60);
-                    }
-                }
+            clicked = page.evaluate(f'''() => {{
+                for (const b of document.querySelectorAll("button")) {{
+                    const t = b.textContent || "";
+                    if (t.includes("{miles_str}k") && t.includes("points")) {{ b.click(); return t.trim().substring(0,50); }}
+                }}
                 return "not found";
-            }''', [seat.miles, cabin_label])
-
+            }}''')
             log.info(f"Fare selection: {clicked}")
             if clicked == "not found":
-                log.error("Could not find matching fare button")
-                self.alerter.send_health_warning(f"Booking failed: fare not found for {seat}")
+                log.error("Fare not found on results page")
                 return False
-
             time.sleep(5)
 
-            # Step 3: Trip Summary page — verify and click "Add to cart"
-            page.screenshot(path="/tmp/booking_summary.png")
-
-            has_summary = page.evaluate('''() => {
-                return document.body.textContent.includes("Trip summary");
+            # Step 3: Add to cart (submit form)
+            page.evaluate('''() => {
+                for (const f of document.querySelectorAll("form")) {
+                    if ((f.textContent||"").toLowerCase().includes("add to cart")) { f.submit(); return; }
+                }
             }''')
+            time.sleep(8)
 
-            if not has_summary:
-                log.error("Trip Summary page didn't load")
+            # Step 4: Continue to checkout
+            page.evaluate('''() => {
+                for (const el of document.querySelectorAll("fs-auro-button")) {
+                    if ((el.textContent||"").toLowerCase().includes("continue to checkout")) { el.click(); return; }
+                }
+            }''')
+            time.sleep(8)
+
+            # Step 5: Eject to classic checkout
+            page.evaluate('''() => {
+                for (const f of document.querySelectorAll("form")) {
+                    if (f.action && f.action.includes("eject")) { f.submit(); return; }
+                }
+            }''')
+            time.sleep(10)
+
+            # Step 6: Fill passenger info + submit
+            passenger = self._get_passenger()
+            page.evaluate(f'''() => {{
+                const set = (id, v) => {{ const el=document.getElementById(id); if(el){{el.value=v; el.dispatchEvent(new Event("change",{{bubbles:true}}));}} }};
+                set("Traveler_0__FirstName", "{passenger['first_name']}");
+                set("Traveler_0__LastName", "{passenger['last_name']}");
+                set("Traveler_0__Gender", "Male");
+                set("Traveler_0__BirthMonth", "1");
+                set("Traveler_0__BirthDay", "15");
+                set("Traveler_0__BirthYear", "1990");
+                const btn = document.getElementById("ContinueButton");
+                if (btn) {{ const form = btn.closest("form"); if (form) form.submit(); }}
+            }}''')
+
+            # Wait for seats page
+            for _ in range(15):
+                time.sleep(1)
+                if "Seat" in page.title():
+                    break
+            log.info(f"After passenger: {page.title()}")
+
+            # Step 7: Skip seats (submit seats form)
+            time.sleep(2)
+            page.evaluate('() => { const f = document.getElementById("ascom-seats-form"); if(f) f.submit(); }')
+            for _ in range(15):
+                time.sleep(1)
+                if "Payment" in page.title():
+                    break
+            log.info(f"After seats: {page.title()}")
+
+            if "Payment" not in page.title():
+                log.error(f"Not on payment page: {page.title()}")
+                page.screenshot(path="/tmp/booking_error.png")
                 return False
 
-            # Step 4: Send Telegram confirmation
+            # Step 8: Telegram confirmation (30s window)
             confirm_text = (
                 f"BOOKING CONFIRMATION REQUIRED\n\n"
                 f"{seat.airline} {seat.flight_number}\n"
                 f"{seat.origin} -> {seat.destination}\n"
-                f"{seat.date} | {'Business' if seat.cabin == 'J' else 'First'}\n"
+                f"{seat.date} | {'Business' if seat.cabin == 'J' else 'Economy'}\n"
                 f"{seat.miles:,} miles + ${seat.tax:.2f}\n\n"
                 f"Tap CONFIRM within 30 seconds to purchase."
             )
@@ -103,7 +139,6 @@ class Booker:
             event = threading.Event()
             self._pending_confirm[seat.id] = event
             self._confirm_result[seat.id] = False
-
             self.alerter.send_confirmation(confirm_text, seat.id)
 
             confirmed = event.wait(timeout=30)
@@ -112,93 +147,45 @@ class Booker:
 
             if not confirmed or not result:
                 log.info(f"Booking not confirmed for {seat}")
-                self.alerter.send_health_warning(f"Booking timed out for {seat.flight_number} {seat.date}")
+                self.alerter.send_health_warning(f"Booking timed out: {seat.flight_number} {seat.date}")
                 return False
 
-            # Step 5: Click "Add to cart"
-            log.info("User confirmed — adding to cart...")
-            add_clicked = page.evaluate('''() => {
-                const btns = document.querySelectorAll("button, auro-button");
-                for (const b of btns) {
-                    const text = (b.textContent || "").trim().toLowerCase();
-                    if (text.includes("add to cart")) {
-                        b.click();
-                        return true;
-                    }
-                }
-                // Shadow DOM
-                for (const el of document.querySelectorAll("*")) {
-                    if (el.shadowRoot) {
-                        for (const b of el.shadowRoot.querySelectorAll("button")) {
-                            if ((b.textContent || "").toLowerCase().includes("add to cart")) {
-                                b.click();
-                                return true;
-                            }
-                        }
-                    }
-                }
-                return false;
-            }''')
-
-            if not add_clicked:
-                log.error("Could not click 'Add to cart'")
+            # Step 9: Fill CVV + click PURCHASE
+            log.info("User confirmed — purchasing...")
+            cvv_code = self.config.get("alaska", {}).get("card_security_code", "")
+            if not cvv_code:
+                log.error("No card_security_code in config")
                 return False
 
-            time.sleep(8)
-            page.screenshot(path="/tmp/booking_cart.png")
+            cvv = page.locator("#CreditCardInformation_BillingCreditCards_0__SecurityCode")
+            cvv.click(force=True)
+            time.sleep(0.3)
+            cvv.fill(cvv_code)
+            log.info(f"CVV set ({len(cvv.input_value())} chars)")
 
-            # Step 6: Cart page — click Purchase/Checkout
-            purchase_clicked = page.evaluate('''() => {
-                const btns = document.querySelectorAll("button, auro-button, a");
-                for (const b of btns) {
-                    const text = (b.textContent || "").trim().toLowerCase();
-                    if (text.includes("purchase") || text.includes("checkout") || text.includes("complete")) {
-                        b.click();
-                        return text;
-                    }
-                }
-                for (const el of document.querySelectorAll("*")) {
-                    if (el.shadowRoot) {
-                        for (const b of el.shadowRoot.querySelectorAll("button")) {
-                            const text = (b.textContent || "").toLowerCase();
-                            if (text.includes("purchase") || text.includes("checkout")) {
-                                b.click();
-                                return text;
-                            }
-                        }
-                    }
-                }
-                return "not found";
-            }''')
+            # CRITICAL: no_wait_after=True — purchase navigation takes >30s
+            page.locator("#PurchaseButton").click(force=True, no_wait_after=True)
+            log.info("PURCHASE clicked, waiting for confirmation...")
+            time.sleep(45)
 
-            log.info(f"Purchase click: {purchase_clicked}")
-            time.sleep(10)
-            page.screenshot(path="/tmp/booking_final.png")
+            # Step 10: Check confirmation
+            title = page.title()
+            page.screenshot(path="/tmp/booking_confirmation.png")
 
-            # Step 7: Verify success
-            success = page.evaluate('''() => {
-                const text = document.body.textContent.toLowerCase();
-                return text.includes("confirmation") || text.includes("booked") ||
-                       text.includes("itinerary") || text.includes("receipt") ||
-                       text.includes("thank you");
-            }''')
-
-            if success:
+            if "confirmed" in title.lower() or "thank you" in title.lower():
                 self.db.update_status(seat.id, "booked")
                 self.alerter.send_health_warning(
-                    f"BOOKED!\n"
+                    f"BOOKED! Confirmation: check Alaska account\n"
                     f"{seat.airline} {seat.flight_number}\n"
                     f"{seat.origin} -> {seat.destination} {seat.date}\n"
                     f"{seat.miles:,} miles + ${seat.tax:.2f}"
                 )
-                log.info(f"Successfully booked: {seat}")
+                log.info(f"BOOKED: {seat}")
                 return True
             else:
-                log.error("Purchase may not have completed")
-                page.screenshot(path="/tmp/booking_unclear.png")
+                log.warning(f"Purchase status unclear: {title}")
                 self.alerter.send_health_warning(
-                    f"Booking status unclear for {seat.flight_number} {seat.date}. "
-                    "Check your Alaska account."
+                    f"Booking status unclear for {seat.flight_number} {seat.date}. Check your Alaska account."
                 )
                 return False
 
@@ -216,3 +203,10 @@ class Booker:
         event = self._pending_confirm.get(award_id)
         if event:
             event.set()
+
+    def _get_passenger(self) -> dict:
+        """Get passenger info from config, default to first passenger."""
+        passengers = self.config.get("passengers", [])
+        if passengers:
+            return passengers[0]
+        return {"first_name": "HAO", "last_name": "CHEN"}
