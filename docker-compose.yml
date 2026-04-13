@@ -4,6 +4,7 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    shm_size: '2gb'
 
   web:
     build: .
