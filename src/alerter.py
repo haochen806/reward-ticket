@@ -1,7 +1,9 @@
 import json
 import logging
+import smtplib
 import threading
 import time
+from email.mime.text import MIMEText
 from urllib.parse import urlencode
 
 import requests
@@ -13,14 +15,48 @@ log = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 
 
+class EmailAlerter:
+    """Send email alerts via SMTP (Gmail)."""
+
+    def __init__(self, smtp_server: str, smtp_port: int, username: str, password: str, to: str):
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self.username = username
+        self.password = password
+        self.to = to
+
+    def send(self, subject: str, body: str):
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = self.username
+        msg["To"] = self.to
+        try:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as s:
+                s.starttls()
+                s.login(self.username, self.password)
+                s.send_message(msg)
+            log.info(f"Email sent: {subject}")
+        except Exception as e:
+            log.error(f"Email failed: {e}")
+
+
 class TelegramAlerter:
-    def __init__(self, bot_token: str, chat_id: str):
+    def __init__(self, bot_token: str, chat_id: str, email_config: dict | None = None):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self._offset = 0
         self._db = None
         self._booker = None
         self._polling_thread = None
+        self._email = None
+        if email_config and email_config.get("username"):
+            self._email = EmailAlerter(
+                email_config.get("smtp_server", "smtp.gmail.com"),
+                email_config.get("smtp_port", 587),
+                email_config["username"],
+                email_config["password"],
+                email_config.get("to", email_config["username"]),
+            )
 
     def set_booker(self, booker):
         """Attach the booker for handling book/confirm callbacks."""
@@ -48,6 +84,12 @@ class TelegramAlerter:
         }
 
         self._send_message(text, keyboard)
+
+        # Also send email
+        if self._email:
+            subject = f"Award: {seat.airline} {seat.flight_number} {seat.origin}->{seat.destination} {seat.date} {seat.miles:,}mi"
+            body = f"{text}\n\nBook now: {deep_link}"
+            self._email.send(subject, body)
 
     def send_confirmation(self, text: str, award_id: str):
         """Send a booking confirmation prompt with Confirm/Cancel buttons."""

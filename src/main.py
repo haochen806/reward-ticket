@@ -38,7 +38,17 @@ def main():
         sys.exit(1)
 
     db = Database(config.database.path)
-    alerter = TelegramAlerter(config.telegram.bot_token, config.telegram.chat_id)
+    # Load email config if present
+    raw_cfg = {}
+    try:
+        import yaml
+        with open(config_path) as f:
+            raw_cfg = yaml.safe_load(f) or {}
+    except:
+        pass
+    email_config = raw_cfg.get("email")
+
+    alerter = TelegramAlerter(config.telegram.bot_token, config.telegram.chat_id, email_config=email_config)
     browser = BrowserSession()
 
     # Wire up booker for auto-booking via Telegram
