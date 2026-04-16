@@ -26,4 +26,4 @@ COPY config.yaml.example .
 VOLUME /app/data
 
 # Start Xvfb + monitor
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 &>/dev/null & python -m src.main /app/data/config.yaml"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -screen 0 1920x1080x24 &>/dev/null & sleep 1 && python -m src.main /app/data/config.yaml"]

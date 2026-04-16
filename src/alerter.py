@@ -27,6 +27,12 @@ class TelegramAlerter:
         self._booker = booker
 
     def send_alert(self, seat: AwardSeat):
+        deep_link = (
+            f"https://www.alaskaair.com/search/results?"
+            f"O={seat.origin}&D={seat.destination}&OD={seat.date}"
+            f"&A=1&RT=false&ShoppingMethod=onlineaward&locale=en-us"
+        )
+
         text = (
             f"SAVER SEAT FOUND\n"
             f"{seat.airline} {seat.flight_number} | {seat.origin} -> {seat.destination}\n"
@@ -36,7 +42,7 @@ class TelegramAlerter:
 
         keyboard = {
             "inline_keyboard": [[
-                {"text": "Book Now", "callback_data": json.dumps({"action": "book", "id": seat.id})},
+                {"text": "Book Now", "url": deep_link},
                 {"text": "Dismiss", "callback_data": json.dumps({"action": "dismiss", "id": seat.id})},
             ]]
         }
