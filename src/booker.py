@@ -97,10 +97,10 @@ class Booker:
                 const set = (id, v) => {{ const el=document.getElementById(id); if(el){{el.value=v; el.dispatchEvent(new Event("change",{{bubbles:true}}));}} }};
                 set("Traveler_0__FirstName", "{passenger['first_name']}");
                 set("Traveler_0__LastName", "{passenger['last_name']}");
-                set("Traveler_0__Gender", "Male");
-                set("Traveler_0__BirthMonth", "1");
-                set("Traveler_0__BirthDay", "15");
-                set("Traveler_0__BirthYear", "1990");
+                set("Traveler_0__Gender", "{passenger['gender']}");
+                set("Traveler_0__BirthMonth", "{passenger['birth_month']}");
+                set("Traveler_0__BirthDay", "{passenger['birth_day']}");
+                set("Traveler_0__BirthYear", "{passenger['birth_year']}");
                 const btn = document.getElementById("ContinueButton");
                 if (btn) {{ const form = btn.closest("form"); if (form) form.submit(); }}
             }}''')
@@ -204,9 +204,25 @@ class Booker:
         if event:
             event.set()
 
+    _REQUIRED_PASSENGER_FIELDS = (
+        "first_name", "last_name", "gender",
+        "birth_month", "birth_day", "birth_year",
+    )
+
     def _get_passenger(self) -> dict:
-        """Get passenger info from config, default to first passenger."""
-        passengers = self.config.get("passengers", [])
-        if passengers:
-            return passengers[0]
-        return {"first_name": "HAO", "last_name": "CHEN"}
+        """Return the primary passenger from config. Errors loudly if unset or incomplete.
+
+        No default — booking under a hardcoded identity is never correct. The caller
+        must provide a `passengers:` block in config.yaml with all required fields.
+        """
+        passengers = self.config.get("passengers") or []
+        if not passengers:
+            raise ValueError(
+                "Booker requires a `passengers:` block in config.yaml with at least one entry. "
+                f"Required fields: {', '.join(self._REQUIRED_PASSENGER_FIELDS)}."
+            )
+        passenger = passengers[0]
+        missing = [f for f in self._REQUIRED_PASSENGER_FIELDS if not passenger.get(f)]
+        if missing:
+            raise ValueError(f"passengers[0] missing required fields: {', '.join(missing)}")
+        return passenger

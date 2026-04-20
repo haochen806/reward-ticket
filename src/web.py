@@ -294,8 +294,8 @@ def main():
     except Exception:
         pass
 
-    log.info(f"Web UI starting on http://0.0.0.0:8080")
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    log.info("Web UI starting on http://127.0.0.1:8080 (loopback only — no auth)")
+    app.run(host="127.0.0.1", port=8080, debug=False)
 
 
 if __name__ == "__main__":

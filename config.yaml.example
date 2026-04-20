@@ -30,3 +30,14 @@ telegram:
 # Database settings
 database:
   path: "./data/awards.db"
+
+# Passenger info (REQUIRED if you enable the auto-booker)
+# Booker will raise ValueError at book time if this block is missing or incomplete.
+# Never commit real passenger PII to a public repo — keep this in config.yaml only (gitignored).
+# passengers:
+#   - first_name: "FIRST"
+#     last_name: "LAST"
+#     gender: "Male"      # "Male" or "Female" (Alaska form values)
+#     birth_month: "1"    # 1-12
+#     birth_day: "15"     # 1-31
+#     birth_year: "1990"
